@@ -159,11 +159,6 @@ class DiscreteActionWrapper(gym.ActionWrapper):
         selection = self.action_map[act]
         return {k: np.array(v, dtype=np.float32) if k != "switch_mode" else v for k, v in selection.items()}
 
-class SoftmaxDQN(DQN):
-    def __init__(self, *args, temperature=1.0, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.temperature = temperature
-
 # ==========================================
 # 2. STREAMLIT UI
 # ==========================================
@@ -183,10 +178,6 @@ if uploaded_file is not None:
     with open("temp_model.zip", "wb") as f:
         f.write(uploaded_file.getbuffer())
     
-    try:
-        model = SoftmaxDQN.load("temp_model.zip", custom_objects={"SoftmaxDQN": SoftmaxDQN})
-        st.sidebar.success("✅ SoftmaxDQN Model Loaded!")
-    except:
         model = DQN.load("temp_model.zip")
         st.sidebar.success("✅ Standard DQN Model Loaded!")
 
@@ -316,3 +307,4 @@ if uploaded_file is not None:
         
 else:
     st.info("👈 Please upload a .zip model file from the sidebar to start.")
+
