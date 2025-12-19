@@ -183,10 +183,6 @@ if uploaded_file is not None:
     with open("temp_model.zip", "wb") as f:
         f.write(uploaded_file.getbuffer())
     
-    try:
-        model = SoftmaxDQN.load("temp_model.zip", custom_objects={"SoftmaxDQN": SoftmaxDQN})
-        st.sidebar.success("✅ SoftmaxDQN Model Loaded!")
-    except:
         model = DQN.load("temp_model.zip")
         st.sidebar.success("✅ Standard DQN Model Loaded!")
 
@@ -211,3 +207,4 @@ if uploaded_file is not None:
         for step in range(n_steps):
             action, _ = model.predict(obs, deterministic=deterministic)
             obs, reward, terminated, truncated, info = env.step(action)
+
