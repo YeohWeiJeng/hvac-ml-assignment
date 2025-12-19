@@ -4,12 +4,12 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import torch
+import torch.nn as nn
 from gymnasium import spaces
-from torch.distributions import Categorical
 from stable_baselines3 import DQN
 
 # ==========================================
-# 1. CLASS DEFINITIONS (Must match training)
+# 1. SHARED ENVIRONMENT DEFINITION
 # ==========================================
 
 class HVACEnv(gym.Env):
@@ -38,7 +38,6 @@ class HVACEnv(gym.Env):
             "cooler_level": spaces.Box(low=0.0, high=100.0, shape=(1,), dtype=np.float32)
         })
 
-        # Rewards & Weights
         self.weights = {'alpha': 1.0, 'beta': 10.0, 'gamma': 2.0}
         self.TARGET_TEMP = 24.0
         self.state = {}
@@ -76,7 +75,7 @@ class HVACEnv(gym.Env):
         terminated = False
         indoor_t = self.state["indoor_temperature"][0]
         if indoor_t > 35.0 or indoor_t < 16.0:
-            terminated = True # Safety cutoff
+            terminated = True 
 
         return self.state, float(reward), terminated, False, {}
 
@@ -143,6 +142,10 @@ class HVACEnv(gym.Env):
         term_deviation = self.weights['gamma'] * abs(T_room - self.TARGET_TEMP)
         return float(-term_energy + term_comfort - term_deviation)
 
+# ==========================================
+# 2. DQN SPECIFIC CLASSES (Standard)
+# ==========================================
+
 class DiscreteActionWrapper(gym.ActionWrapper):
     def __init__(self, env):
         super().__init__(env)
@@ -160,151 +163,232 @@ class DiscreteActionWrapper(gym.ActionWrapper):
         return {k: np.array(v, dtype=np.float32) if k != "switch_mode" else v for k, v in selection.items()}
 
 # ==========================================
-# 2. STREAMLIT UI
+# 3. DDPG SPECIFIC CLASSES (Continuous)
+# ==========================================
+
+class ContinuousActionWrapper(gym.ActionWrapper):
+    def __init__(self, env):
+        super().__init__(env)
+        # 6 continuous values
+        self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(6,), dtype=np.float32)
+
+    def action(self, act):
+        # Map 6 floats to dictionary
+        # Act[5] maps to mode (Discrete 0-3)
+        mode_val = act[5]
+        if mode_val < -0.5: mode = 0
+        elif mode_val < 0.0: mode = 1
+        elif mode_val < 0.5: mode = 2
+        else: mode = 3
+        
+        return {
+            "adjust_setpoint": np.array([act[0]], dtype=np.float32),
+            "change_fan_speed": np.array([np.clip(act[1], 0, 1)], dtype=np.float32),
+            "modulate_ventilation": np.array([np.clip(act[2], 0, 1)], dtype=np.float32),
+            "dehumidification": np.array([act[3]], dtype=np.float32),
+            "adjust_preconditioning": np.array([act[4]], dtype=np.float32),
+            "switch_mode": mode
+        }
+
+class Actor(nn.Module):
+    def __init__(self, state_dim, action_dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(state_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, action_dim),
+            nn.Tanh()
+        )
+    def forward(self, x):
+        return self.net(x)
+
+def flatten_state(obs):
+    return np.concatenate([v.flatten() if isinstance(v, np.ndarray) else [v] for v in obs.values()])
+
+# ==========================================
+# 4. STREAMLIT UI
 # ==========================================
 
 st.set_page_config(page_title="HVAC Model Visualizer", layout="wide")
-st.title("🌡️ HVAC Reinforcement Learning Visualizer")
+st.title("🌡️ HVAC Unified Model Visualizer (Standard DQN & DDPG)")
 
 # --- SIDEBAR ---
 st.sidebar.header("1. Upload Model")
-uploaded_file = st.sidebar.file_uploader("Upload .zip model file", type="zip")
+uploaded_file = st.sidebar.file_uploader("Upload .zip (DQN) or .pth (DDPG)", type=["zip", "pth"])
 st.sidebar.header("2. Simulation Settings")
 n_steps = st.sidebar.slider("Simulation Steps", min_value=100, max_value=2000, value=600)
 deterministic = st.sidebar.checkbox("Deterministic (Best Action)", value=True)
 
 # --- MAIN LOGIC ---
 if uploaded_file is not None:
-    with open("temp_model.zip", "wb") as f:
+    
+    # Identify Model Type
+    file_name = uploaded_file.name
+    model_type = "DQN" if file_name.endswith(".zip") else "DDPG"
+    
+    with open(f"temp_model.{'zip' if model_type == 'DQN' else 'pth'}", "wb") as f:
         f.write(uploaded_file.getbuffer())
     
-        model = DQN.load("temp_model.zip")
-        st.sidebar.success("✅ Standard DQN Model Loaded!")
+    model = None
+    
+    if model_type == "DQN":
+        try:
+            # Standard DQN Load
+            model = DQN.load("temp_model.zip")
+            st.sidebar.success(f"✅ Standard DQN Loaded ({file_name})")
+        except Exception as e:
+            st.sidebar.error(f"Error loading DQN: {e}")
+    else:
+        # Load DDPG Actor
+        try:
+            temp_env = HVACEnv()
+            state_dim = sum(np.prod(v.shape) if isinstance(v, np.ndarray) else 1 for v in temp_env.reset()[0].values())
+            action_dim = 6 # Continuous wrapper dimension
+            
+            model = Actor(state_dim, action_dim)
+            model.load_state_dict(torch.load("temp_model.pth"))
+            model.eval()
+            st.sidebar.success(f"✅ DDPG Actor Loaded ({file_name})")
+        except Exception as e:
+            st.sidebar.error(f"Error loading DDPG: {e}")
+
+    if 'simulation_logs' not in st.session_state:
+        st.session_state.simulation_logs = None
 
     if st.sidebar.button("Run Simulation"):
-        # Setup Env
-        raw_env = HVACEnv()
-        env = DiscreteActionWrapper(raw_env)
-        
-        obs, _ = env.reset()
-        done = False
-        logs = []
-        
-        progress_bar = st.progress(0)
-        
-        # --- Metrics Tracking ---
-        comfort_zone_min = 23.0
-        comfort_zone_max = 25.0
-        steps_comfort = 0
-        steps_too_hot = 0
-        steps_too_cold = 0
-        
-        for step in range(n_steps):
-            action, _ = model.predict(obs, deterministic=deterministic)
-            obs, reward, terminated, truncated, info = env.step(action)
+        with st.spinner("Simulating..."):
             
-            raw_state = env.env.state 
-            indoor_temp = raw_state["indoor_temperature"][0]
-            
-            # Track Comfort
-            if comfort_zone_min <= indoor_temp <= comfort_zone_max:
-                steps_comfort += 1
-                comfort_status = "Comfortable"
-            elif indoor_temp < comfort_zone_min:
-                steps_too_cold += 1
-                comfort_status = "Too Cold"
+            # Setup Correct Environment Wrapper
+            raw_env = HVACEnv()
+            if model_type == "DQN":
+                env = DiscreteActionWrapper(raw_env)
             else:
-                steps_too_hot += 1
-                comfort_status = "Too Hot"
-
-            log_entry = {
-                "Step": step,
-                "Indoor Temp": indoor_temp,
-                "Outdoor Temp": raw_state["outdoor_temperature"][0],
-                "Occupancy": raw_state["occupancy"],
-                "Power (W)": raw_state["power_consumption"][0],
-                "Action Index": int(action),
-                "Reward": reward,
-                "Comfort Status": comfort_status
-            }
-            logs.append(log_entry)
+                env = ContinuousActionWrapper(raw_env)
             
-            if terminated or truncated:
-                break
+            obs, _ = env.reset()
+            logs = []
             
-            progress_bar.progress((step + 1) / n_steps)
+            steps_comfort = 0
+            steps_too_hot = 0
+            steps_too_cold = 0
+            
+            for step in range(n_steps):
+                
+                # PREDICTION LOGIC
+                if model_type == "DQN":
+                    action, _ = model.predict(obs, deterministic=deterministic)
+                    display_action = int(action) 
+                else:
+                    # DDPG Prediction
+                    state_flat = flatten_state(obs)
+                    state_tensor = torch.FloatTensor(state_flat).unsqueeze(0)
+                    with torch.no_grad():
+                        action_raw = model(state_tensor).squeeze(0).numpy()
+                    
+                    if not deterministic:
+                        action_raw += np.random.normal(0, 0.1, size=action_raw.shape)
+                        action_raw = np.clip(action_raw, -1.0, 1.0)
+                        
+                    action = action_raw # This is the array [6]
+                    
+                    # For visualization, infer the "Mode" from index 5
+                    mode_val = action[5]
+                    if mode_val < -0.5: display_action = 0
+                    elif mode_val < 0.0: display_action = 1
+                    elif mode_val < 0.5: display_action = 2
+                    else: display_action = 3
 
-        df = pd.DataFrame(logs)
+                # STEP
+                obs, reward, terminated, truncated, info = env.step(action)
+                
+                raw_state = env.env.state 
+                indoor_temp = raw_state["indoor_temperature"][0]
+                
+                # Track Comfort
+                if 23.0 <= indoor_temp <= 25.0:
+                    steps_comfort += 1
+                    comfort_status = "Comfortable"
+                elif indoor_temp < 23.0:
+                    steps_too_cold += 1
+                    comfort_status = "Too Cold"
+                else:
+                    steps_too_hot += 1
+                    comfort_status = "Too Hot"
+
+                log_entry = {
+                    "Step": step,
+                    "Indoor Temp": indoor_temp,
+                    "Outdoor Temp": raw_state["outdoor_temperature"][0],
+                    "Power (W)": raw_state["power_consumption"][0],
+                    "Action Index": display_action,
+                    "Reward": reward
+                }
+                logs.append(log_entry)
+                
+                if terminated or truncated:
+                    break
+            
+            st.session_state.simulation_logs = pd.DataFrame(logs)
+            st.session_state.steps_comfort = steps_comfort
+            st.session_state.steps_too_cold = steps_too_cold
+            st.session_state.steps_too_hot = steps_too_hot
+            st.session_state.n_steps = n_steps 
+
+    # VISUALIZATION
+    if st.session_state.simulation_logs is not None:
+        df = st.session_state.simulation_logs
         
-        # --- VISUALIZATION ---
-        
-        # 1. Metrics Row (Updated with Comfort Score)
+        # 1. Metrics
         col1, col2, col3, col4 = st.columns(4)
-        
         avg_temp = df["Indoor Temp"].mean()
-        total_energy = df["Power (W)"].sum() / 1000.0 # kWh estimate
-        success = "Yes" if len(df) >= n_steps and not df["Indoor Temp"].iloc[-1] > 35 else "No (Crash)"
+        total_energy = df["Power (W)"].sum() / 1000.0 
+        success = "Yes" if len(df) >= st.session_state.n_steps and not df["Indoor Temp"].iloc[-1] > 35 else "No (Crash)"
         
-        # Calculate Comfort Score
-        total_sim_steps = len(df)
-        comfort_score = (steps_comfort / total_sim_steps) * 100
+        comfort_score = (st.session_state.steps_comfort / len(df)) * 100
         
         col1.metric("Avg Indoor Temp", f"{avg_temp:.2f} °C")
         col2.metric("Total Energy", f"{total_energy:.2f} kWh")
         col3.metric("Comfort Score", f"{comfort_score:.1f}%")
         col4.metric("Episode Success", success)
         
-        # 2. Temperature Plot (Matplotlib with Shaded Region)
+        # 2. Charts
         st.subheader("Temperature Profile & Comfort Zone")
-        
         fig, ax = plt.subplots(figsize=(10, 4))
         ax.plot(df['Step'], df['Indoor Temp'], label="Indoor Temp", color="#d62728", linewidth=2)
         ax.plot(df['Step'], df['Outdoor Temp'], label="Outdoor Temp", color="#1f77b4", linestyle="--", alpha=0.5)
-        
-        # Draw Green Comfort Zone
-        ax.axhspan(comfort_zone_min, comfort_zone_max, color='green', alpha=0.2, label="Comfort Zone (23-25°C)")
-        ax.axhline(y=comfort_zone_min, color='green', linestyle=':', alpha=0.5)
-        ax.axhline(y=comfort_zone_max, color='green', linestyle=':', alpha=0.5)
-        
-        ax.set_ylabel("Temperature (°C)")
-        ax.set_xlabel("Steps")
-        ax.legend(loc="upper right")
+        ax.axhspan(23.0, 25.0, color='green', alpha=0.2, label="Comfort Zone")
+        ax.axhline(y=23.0, color='green', linestyle=':', alpha=0.5)
+        ax.axhline(y=25.0, color='green', linestyle=':', alpha=0.5)
+        ax.legend()
         ax.grid(True, alpha=0.3)
-        
         st.pyplot(fig)
 
-        # 3. Comfort Breakdown (Pie Chart)
-        st.subheader("Thermal Comfort Breakdown")
-        
+        # 3. Breakdown & Actions
         col_chart1, col_chart2 = st.columns(2)
         
         with col_chart1:
-            # Power Plot
-            fig2, ax2 = plt.subplots(figsize=(5, 4))
-            ax2.plot(df['Step'], df['Power (W)'], color='orange', alpha=0.8)
-            ax2.set_title("Power Consumption (Watts)")
-            ax2.set_xlabel("Steps")
-            ax2.grid(True, alpha=0.3)
-            st.pyplot(fig2)
-            
-        with col_chart2:
-            # Pie Chart
-            labels = ['Too Cold (<23)', 'Comfortable (23-25)', 'Too Hot (>25)']
-            sizes = [steps_too_cold, steps_comfort, steps_too_hot]
-            colors = ['#3498db', '#2ecc71', '#e74c3c'] # Blue, Green, Red
-            
+             # Pie Chart
+            labels = ['Too Cold', 'Comfortable', 'Too Hot']
+            sizes = [st.session_state.steps_too_cold, st.session_state.steps_comfort, st.session_state.steps_too_hot]
+            colors = ['#3498db', '#2ecc71', '#e74c3c'] 
             fig3, ax3 = plt.subplots(figsize=(5, 4))
             ax3.pie(sizes, labels=labels, autopct='%1.1f%%', colors=colors, startangle=140)
-            ax3.set_title("Time Spent in Zones")
+            ax3.set_title("Thermal Comfort Breakdown")
             st.pyplot(fig3)
-        
-        # 4. Actions Taken
-        st.subheader("Agent Actions")
-        action_counts = df['Action Index'].value_counts().sort_index()
-        action_map_labels = {0: "0: Off/Idle", 1: "1: Cool Low", 2: "2: Cool High", 3: "3: Fan Only"}
-        action_counts.index = action_counts.index.map(action_map_labels)
-        st.bar_chart(action_counts)
-        
-else:
-    st.info("👈 Please upload a .zip model file from the sidebar to start.")
+            
+        with col_chart2:
+            st.subheader("Action Mode Distribution")
+            action_counts = df['Action Index'].value_counts().sort_index()
+            # Map labels for display
+            action_map_labels = {0: "0: Off/Idle", 1: "1: Cool Low", 2: "2: Cool High", 3: "3: Fan Only"}
+            action_counts.index = action_counts.index.map(action_map_labels)
+            st.bar_chart(action_counts)
 
+        if st.button("Clear Results"):
+            st.session_state.simulation_logs = None
+            st.rerun()
+
+else:
+    st.info("👈 Please upload a .zip (DQN) or .pth (DDPG) model file.")
