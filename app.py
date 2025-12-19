@@ -171,31 +171,25 @@ class SoftmaxDQN(DQN):
 st.set_page_config(page_title="HVAC Model Visualizer", layout="wide")
 st.title("🌡️ HVAC Reinforcement Learning Visualizer")
 
-# --- SIDEBAR: Upload Model ---
+# --- SIDEBAR ---
 st.sidebar.header("1. Upload Model")
 uploaded_file = st.sidebar.file_uploader("Upload .zip model file", type="zip")
-
-# --- SIDEBAR: Settings ---
 st.sidebar.header("2. Simulation Settings")
 n_steps = st.sidebar.slider("Simulation Steps", min_value=100, max_value=2000, value=600)
 deterministic = st.sidebar.checkbox("Deterministic (Best Action)", value=True)
 
 # --- MAIN LOGIC ---
 if uploaded_file is not None:
-    # Save the uploaded file temporarily so SB3 can load it
     with open("temp_model.zip", "wb") as f:
         f.write(uploaded_file.getbuffer())
     
-    # Load Model
     try:
-        # We try loading as SoftmaxDQN, fallback to standard DQN if needed
         model = SoftmaxDQN.load("temp_model.zip", custom_objects={"SoftmaxDQN": SoftmaxDQN})
         st.sidebar.success("✅ SoftmaxDQN Model Loaded!")
     except:
         model = DQN.load("temp_model.zip")
         st.sidebar.success("✅ Standard DQN Model Loaded!")
 
-    # Run Simulation Button
     if st.sidebar.button("Run Simulation"):
         # Setup Env
         raw_env = HVACEnv()
@@ -207,76 +201,13 @@ if uploaded_file is not None:
         
         progress_bar = st.progress(0)
         
+        # --- Metrics Tracking ---
+        comfort_zone_min = 23.0
+        comfort_zone_max = 25.0
+        steps_comfort = 0
+        steps_too_hot = 0
+        steps_too_cold = 0
+        
         for step in range(n_steps):
-            # Predict
             action, _ = model.predict(obs, deterministic=deterministic)
             obs, reward, terminated, truncated, info = env.step(action)
-            
-            # Log Data (Extract from raw environment state for better visibility)
-            # The 'env' is the wrapper, 'env.env' is the raw HVACEnv
-            raw_state = env.env.state 
-            
-            log_entry = {
-                "Step": step,
-                "Indoor Temp": raw_state["indoor_temperature"][0],
-                "Outdoor Temp": raw_state["outdoor_temperature"][0],
-                "Occupancy": raw_state["occupancy"],
-                "Power (W)": raw_state["power_consumption"][0],
-                "Action Index": int(action),
-                "Reward": reward
-            }
-            logs.append(log_entry)
-            
-            if terminated or truncated:
-                break
-            
-            progress_bar.progress((step + 1) / n_steps)
-
-        # Convert to DataFrame
-        df = pd.DataFrame(logs)
-        
-        # --- VISUALIZATION ---
-        
-        # 1. Metrics Row
-        col1, col2, col3 = st.columns(3)
-        avg_temp = df["Indoor Temp"].mean()
-        total_energy = df["Power (W)"].sum() / 1000.0 # kWh estimate (roughly)
-        success = "Yes" if len(df) >= n_steps and not df["Indoor Temp"].iloc[-1] > 35 else "No (Crash)"
-        
-        col1.metric("Avg Indoor Temp", f"{avg_temp:.2f} °C")
-        col2.metric("Total Power Est.", f"{total_energy:.2f} kW-steps")
-        col3.metric("Episode Success", success)
-        
-        # 2. Temperature Plot
-        st.subheader("Temperature Profile")
-        chart_data = df[["Step", "Indoor Temp", "Outdoor Temp"]].set_index("Step")
-        # Add target lines
-        chart_data["Target Max"] = 25.0
-        chart_data["Target Min"] = 23.0
-        st.line_chart(chart_data, color=["#FF4B4B", "#1F77B4", "#00FF00", "#00FF00"])
-        
-        # 3. Power & Occupancy
-        st.subheader("Power Consumption vs Occupancy")
-        fig, ax1 = plt.subplots(figsize=(10, 4))
-        
-        ax1.set_xlabel('Step')
-        ax1.set_ylabel('Power (Watts)', color='tab:red')
-        ax1.plot(df['Step'], df['Power (W)'], color='tab:red', alpha=0.6, label="Power")
-        ax1.tick_params(axis='y', labelcolor='tab:red')
-        
-        ax2 = ax1.twinx()  
-        ax2.set_ylabel('Occupancy', color='tab:blue')
-        ax2.plot(df['Step'], df['Occupancy'], color='tab:blue', linestyle='--', alpha=0.5, label="Occupancy")
-        ax2.tick_params(axis='y', labelcolor='tab:blue')
-        
-        st.pyplot(fig)
-        
-        # 4. Actions Taken Distribution
-        st.subheader("Actions Taken Distribution")
-        action_counts = df['Action Index'].value_counts().sort_index()
-        action_map_labels = {0: "0: Off/Idle", 1: "1: Cool Low", 2: "2: Cool High", 3: "3: Fan Only"}
-        action_counts.index = action_counts.index.map(action_map_labels)
-        st.bar_chart(action_counts)
-        
-else:
-    st.info("👈 Please upload a .zip model file from the sidebar to start.")
