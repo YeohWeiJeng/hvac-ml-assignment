@@ -183,6 +183,10 @@ if uploaded_file is not None:
     with open("temp_model.zip", "wb") as f:
         f.write(uploaded_file.getbuffer())
     
+    try:
+        model = SoftmaxDQN.load("temp_model.zip", custom_objects={"SoftmaxDQN": SoftmaxDQN})
+        st.sidebar.success("✅ SoftmaxDQN Model Loaded!")
+    except:
         model = DQN.load("temp_model.zip")
         st.sidebar.success("✅ Standard DQN Model Loaded!")
 
@@ -207,4 +211,108 @@ if uploaded_file is not None:
         for step in range(n_steps):
             action, _ = model.predict(obs, deterministic=deterministic)
             obs, reward, terminated, truncated, info = env.step(action)
+            
+            raw_state = env.env.state 
+            indoor_temp = raw_state["indoor_temperature"][0]
+            
+            # Track Comfort
+            if comfort_zone_min <= indoor_temp <= comfort_zone_max:
+                steps_comfort += 1
+                comfort_status = "Comfortable"
+            elif indoor_temp < comfort_zone_min:
+                steps_too_cold += 1
+                comfort_status = "Too Cold"
+            else:
+                steps_too_hot += 1
+                comfort_status = "Too Hot"
 
+            log_entry = {
+                "Step": step,
+                "Indoor Temp": indoor_temp,
+                "Outdoor Temp": raw_state["outdoor_temperature"][0],
+                "Occupancy": raw_state["occupancy"],
+                "Power (W)": raw_state["power_consumption"][0],
+                "Action Index": int(action),
+                "Reward": reward,
+                "Comfort Status": comfort_status
+            }
+            logs.append(log_entry)
+            
+            if terminated or truncated:
+                break
+            
+            progress_bar.progress((step + 1) / n_steps)
+
+        df = pd.DataFrame(logs)
+        
+        # --- VISUALIZATION ---
+        
+        # 1. Metrics Row (Updated with Comfort Score)
+        col1, col2, col3, col4 = st.columns(4)
+        
+        avg_temp = df["Indoor Temp"].mean()
+        total_energy = df["Power (W)"].sum() / 1000.0 # kWh estimate
+        success = "Yes" if len(df) >= n_steps and not df["Indoor Temp"].iloc[-1] > 35 else "No (Crash)"
+        
+        # Calculate Comfort Score
+        total_sim_steps = len(df)
+        comfort_score = (steps_comfort / total_sim_steps) * 100
+        
+        col1.metric("Avg Indoor Temp", f"{avg_temp:.2f} °C")
+        col2.metric("Total Energy", f"{total_energy:.2f} kWh")
+        col3.metric("Comfort Score", f"{comfort_score:.1f}%")
+        col4.metric("Episode Success", success)
+        
+        # 2. Temperature Plot (Matplotlib with Shaded Region)
+        st.subheader("Temperature Profile & Comfort Zone")
+        
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.plot(df['Step'], df['Indoor Temp'], label="Indoor Temp", color="#d62728", linewidth=2)
+        ax.plot(df['Step'], df['Outdoor Temp'], label="Outdoor Temp", color="#1f77b4", linestyle="--", alpha=0.5)
+        
+        # Draw Green Comfort Zone
+        ax.axhspan(comfort_zone_min, comfort_zone_max, color='green', alpha=0.2, label="Comfort Zone (23-25°C)")
+        ax.axhline(y=comfort_zone_min, color='green', linestyle=':', alpha=0.5)
+        ax.axhline(y=comfort_zone_max, color='green', linestyle=':', alpha=0.5)
+        
+        ax.set_ylabel("Temperature (°C)")
+        ax.set_xlabel("Steps")
+        ax.legend(loc="upper right")
+        ax.grid(True, alpha=0.3)
+        
+        st.pyplot(fig)
+
+        # 3. Comfort Breakdown (Pie Chart)
+        st.subheader("Thermal Comfort Breakdown")
+        
+        col_chart1, col_chart2 = st.columns(2)
+        
+        with col_chart1:
+            # Power Plot
+            fig2, ax2 = plt.subplots(figsize=(5, 4))
+            ax2.plot(df['Step'], df['Power (W)'], color='orange', alpha=0.8)
+            ax2.set_title("Power Consumption (Watts)")
+            ax2.set_xlabel("Steps")
+            ax2.grid(True, alpha=0.3)
+            st.pyplot(fig2)
+            
+        with col_chart2:
+            # Pie Chart
+            labels = ['Too Cold (<23)', 'Comfortable (23-25)', 'Too Hot (>25)']
+            sizes = [steps_too_cold, steps_comfort, steps_too_hot]
+            colors = ['#3498db', '#2ecc71', '#e74c3c'] # Blue, Green, Red
+            
+            fig3, ax3 = plt.subplots(figsize=(5, 4))
+            ax3.pie(sizes, labels=labels, autopct='%1.1f%%', colors=colors, startangle=140)
+            ax3.set_title("Time Spent in Zones")
+            st.pyplot(fig3)
+        
+        # 4. Actions Taken
+        st.subheader("Agent Actions")
+        action_counts = df['Action Index'].value_counts().sort_index()
+        action_map_labels = {0: "0: Off/Idle", 1: "1: Cool Low", 2: "2: Cool High", 3: "3: Fan Only"}
+        action_counts.index = action_counts.index.map(action_map_labels)
+        st.bar_chart(action_counts)
+        
+else:
+    st.info("👈 Please upload a .zip model file from the sidebar to start.")
