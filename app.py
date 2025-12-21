@@ -56,7 +56,7 @@ class HVACEnv(gym.Env):
             "humidity": np.array([np.random.uniform(60.0, 80.0)], dtype=np.float32),
             "co2_level": np.array([400.0], dtype=np.float32),
             "occupancy": np.array([0.0], dtype=np.float32),
-            "time_of_day": np.array([8.0],
+            "time_of_day": np.array([8.0], dtype=np.float32),
             "power_consumption": np.array([0.0], dtype=np.float32),
             "water_flow_rate": np.array([0.0], dtype=np.float32),
             "hot_water_tank_temp": np.array([60.0], dtype=np.float32),
@@ -439,4 +439,5 @@ if st.session_state.simulation_logs is not None:
     if st.button("Clear Results"):
         st.session_state.simulation_logs = None
         st.rerun()
+
 
