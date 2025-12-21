@@ -33,8 +33,8 @@ class HVACEnv(gym.Env):
             "outdoor_temperature": spaces.Box(low=-15.0, high=45.0, shape=(1,), dtype=np.float32),
             "humidity": spaces.Box(low=0.0, high=100.0, shape=(1,), dtype=np.float32),
             "co2_level": spaces.Box(low=300.0, high=2000.0, shape=(1,), dtype=np.float32),
-            "occupancy": spaces.Discrete(100),
-            "time_of_day": spaces.Discrete(24),
+            "occupancy": spaces.Box(low=0.0, high=100.0, shape=(1,), dtype=np.float32), 
+            "time_of_day": spaces.Box(low=0.0, high=24.0, shape=(1,), dtype=np.float32), 
             "power_consumption": spaces.Box(low=0.0, high=10000.0, shape=(1,), dtype=np.float32),
             "water_flow_rate": spaces.Box(low=0.0, high=100.0, shape=(1,), dtype=np.float32),
             "hot_water_tank_temp": spaces.Box(low=20.0, high=90.0, shape=(1,), dtype=np.float32),
@@ -55,8 +55,8 @@ class HVACEnv(gym.Env):
             "outdoor_temperature": np.array([28.0], dtype=np.float32),
             "humidity": np.array([np.random.uniform(60.0, 80.0)], dtype=np.float32),
             "co2_level": np.array([400.0], dtype=np.float32),
-            "occupancy": 0,
-            "time_of_day": 8,
+            "occupancy": np.array([0.0], dtype=np.float32),
+            "time_of_day": np.array([8.0],
             "power_consumption": np.array([0.0], dtype=np.float32),
             "water_flow_rate": np.array([0.0], dtype=np.float32),
             "hot_water_tank_temp": np.array([60.0], dtype=np.float32),
@@ -83,16 +83,16 @@ class HVACEnv(gym.Env):
         return self.state, float(reward), terminated, False, {}
 
     def _simulate_physics(self, setpoint_adj, fan_speed, vent, dehumid, precond, mode):
-        self.state["time_of_day"] = (8 + (self.current_step // 60)) % 24
+        self.state["time_of_day"][0] = (8 + (self.current_step // 60)) % 24
         hour = self.state["time_of_day"]
         
         base_outdoor = 30.0
         self.state["outdoor_temperature"][0] = base_outdoor + 5.0 * np.sin((hour - 8) * np.pi / 12)
 
         if 9 <= hour <= 17:
-            self.state["occupancy"] = np.random.randint(5, 20)
+            self.state["occupancy"][0] = float(np.random.randint(5, 20))
         else:
-            self.state["occupancy"] = 0
+            self.state["occupancy"][0] = 0.0
 
         self.setpoint_temperature = np.clip(self.setpoint_temperature + setpoint_adj * 0.5, 18.0, 30.0)
 
@@ -439,3 +439,4 @@ if st.session_state.simulation_logs is not None:
     if st.button("Clear Results"):
         st.session_state.simulation_logs = None
         st.rerun()
+
